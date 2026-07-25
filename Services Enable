@@ -1,0 +1,161 @@
+# Asegurar privilegios de administrador para modificar servicios del sistema
+if (-not ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {
+    Write-Warning "Este script requiere ejecutarse como Administrador."
+    Exit
+}
+
+# Cargar ensamblados para la interfaz gráfica (GUI)
+Add-Type -AssemblyName System.Windows.Forms
+Add-Type -AssemblyName System.Drawing
+
+# =========================================================================
+# CONFIGURACIÓN DE LA VENTANA PRINCIPAL (Ajustada al diseño de la imagen)
+# =========================================================================
+$form = New-Object System.Windows.Forms.Form
+$form.Text = "Windows Service Manager"
+$form.Size = New-Object System.Drawing.Size(650, 480)
+$form.StartPosition = "CenterScreen"
+$form.FormBorderStyle = "FixedSingle"
+$form.MaximizeBox = $false
+
+# Etiqueta de instrucciones superior
+$lblInstruction = New-Object System.Windows.Forms.Label
+$lblInstruction.Text = "Select services to enable and set to auto-start:"
+$lblInstruction.Location = New-Object System.Drawing.Point(20, 15)
+$lblInstruction.Size = New-Object System.Drawing.Size(350, 20)
+$lblInstruction.Font = New-Object System.Drawing.Font("Segoe UI", 10, [System.Drawing.FontStyle]::Bold)
+$form.Controls.Add($lblInstruction)
+
+# =========================================================================
+# CREACIÓN DE LA TABLA DE SERVICIOS (ListView)
+# =========================================================================
+$listView = New-Object System.Windows.Forms.ListView
+$listView.Location = New-Object System.Drawing.Point(20, 45)
+$listView.Size = New-Object System.Drawing.Size(595, 300)
+$listView.View = [System.Windows.Forms.View]::Details
+$listView.CheckBoxes = $true
+$listView.FullRowSelect = $true
+$listView.GridLines = $true
+
+# Columnas exactas de la captura de pantalla
+$listView.Columns.Add("Enable", 50) | Out-Null
+$listView.Columns.Add("Service Name", 110) | Out-Null
+$listView.Columns.Add("Status", 80) | Out-Null
+$listView.Columns.Add("Startup Type", 90) | Out-Null
+$listView.Columns.Add("Description", 240) | Out-Null
+$form.Controls.Add($listView)
+
+# Matriz con los servicios exactos de tu lista para auditar/reparar
+$servicesList = @(
+    @{Name="SysMain"; Desc="Prefetcher for faster app loading."}
+    @{Name="PcaSvc"; Desc="Program Compatibility Assistant Service."}
+    @{Name="DPS"; Desc="Diagnostic Policy Service."}
+    @{Name="EventLog"; Desc="Windows Event Log"}
+    @{Name="Schedule"; Desc="Task Scheduler"}
+    @{Name="Bam"; Desc="Background Activity Moderator Driver"}
+    @{Name="wsearch"; Desc="Windows Search"}
+    @{Name="Appinfo"; Desc="Application Information"}
+    @{Name="SSDPSRV"; Desc="SSDP Discovery"}
+    @{Name="CDPSvc"; Desc="Connected Devices Platform Service"}
+    @{Name="DcomLaunch"; Desc="DCOM Server Process Launcher"}
+    @{Name="PlugPlay"; Desc="Plug and Play"}
+    @{Name="DiagTrack"; Desc="Connected User Experiences and Telemetry"}
+    @{Name="DusmSvc"; Desc="Data Usage Service"}
+)
+
+# Función interna para rellenar la tabla leyendo el estado real de la máquina
+function Refresh-ServiceList {
+    $listView.Items.Clear()
+    foreach ($s in $servicesList) {
+        $realSvc = Get-CimInstance Win32_Service -Filter "Name='$($s.Name)'" -ErrorAction SilentlyContinue
+        
+        $status = "Not Found"
+        $startup = "Unknown"
+        if ($realSvc) {
+            $status = $realSvc.State
+            $startup = $realSvc.StartMode
+        }
+
+        $item = New-Object System.Windows.Forms.ListViewItem("")
+        $item.SubItems.Add($s.Name) | Out-Null
+        $item.SubItems.Add($status) | Out-Null
+        $item.SubItems.Add($startup) | Out-Null
+        $item.SubItems.Add($s.Desc) | Out-Null
+        
+        # Guardar el nombre técnico en la propiedad Tag para procesarlo luego
+        $item.Tag = $s.Name
+        $listView.Items.Add($item) | Out-Null
+    }
+}
+
+# =========================================================================
+# CASILLA DE SELECCIONAR TODO (Select All)
+# =========================================================================
+$chkSelectAll = New-Object System.Windows.Forms.CheckBox
+$chkSelectAll.Text = "Select All"
+$chkSelectAll.Location = New-Object System.Drawing.Point(20, 360)
+$chkSelectAll.Size = New-Object System.Drawing.Size(90, 20)
+$chkSelectAll.Add_CheckedChanged({
+    foreach ($item in $listView.Items) {
+        $item.Checked = $chkSelectAll.Checked
+    }
+})
+$form.Controls.Add($chkSelectAll)
+
+# =========================================================================
+# BOTÓN: REFRESCAR LISTA (Refresh List)
+# =========================================================================
+$btnRefresh = New-Object System.Windows.Forms.Button
+$btnRefresh.Text = "Refresh List"
+$btnRefresh.Location = New-Object System.Drawing.Point(495, 355)
+$btnRefresh.Size = New-Object System.Drawing.Size(120, 30)
+$btnRefresh.Add_Click({ Refresh-ServiceList })
+$form.Controls.Add($btnRefresh)
+
+# =========================================================================
+# BOTÓN PRINCIPAL: HABILITAR SELECCIONADOS (Enable Selected Services)
+# =========================================================================
+$btnEnable = New-Object System.Windows.Forms.Button
+$btnEnable.Text = "Enable Selected Services"
+$btnEnable.Location = New-Object System.Drawing.Point(140, 355)
+$btnEnable.Size = New-Object System.Drawing.Size(335, 30)
+$btnEnable.BackColor = [System.Drawing.Color]::LightBlue
+$btnEnable.Font = New-Object System.Drawing.Font("Segoe UI", 9, [System.Drawing.FontStyle]::Bold)
+
+$btnEnable.Add_Click({
+    $processedCount = 0
+    foreach ($item in $listView.Items) {
+        if ($item.Checked) {
+            $svcName = $item.Tag
+            
+            # 1. Quitar el bloqueo si estaba deshabilitado y ponerlo en automático
+            Set-Service -Name $svcName -StartupType Automatic -ErrorAction SilentlyContinue
+            
+            # 2. Forzar el arranque inmediato en segundo plano
+            Start-Service -Name $svcName -ErrorAction SilentlyContinue
+            
+            $processedCount++
+        }
+    }
+    
+    # Mostrar confirmación inferior y refrescar los estados reflejados
+    $lblStatus.Text = "Ready - Successfully enabled and started $processedCount services."
+    Refresh-ServiceList
+})
+$form.Controls.Add($btnEnable)
+
+# =========================================================================
+# BARRA DE ESTADO INFERIOR
+# =========================================================================
+$lblStatus = New-Object System.Windows.Forms.Label
+$lblStatus.Text = "Ready - Select services and click 'Enable Selected Services'"
+$lblStatus.Location = New-Object System.Drawing.Point(20, 405)
+$lblStatus.Size = New-Object System.Drawing.Size(595, 20)
+$lblStatus.BorderStyle = [System.Windows.Forms.BorderStyle]::Fixed3D
+$form.Controls.Add($lblStatus)
+
+# Cargar los datos iniciales al arrancar la ventana gráfica
+Refresh-ServiceList
+
+# Mostrar el panel interactivo en pantalla
+$form.ShowDialog() | Out-Null
